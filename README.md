@@ -91,10 +91,8 @@ be uploaded to test the application.
 ### Prerequisites
 
 1. Have [Docker](https://www.docker.com/) installed locally
-2. Install [COLMAP](https://colmap.github.io/)
-3. Install [ffmpeg](https://ffmpeg.org/)
-4. If you intend to run the NeRF and COLMAP workers locally ensure you have
-NVIDIA GPUS with atleast 6GB of vram as these are resource intensive applications
+NOTE: The Docker container comes preloaded with ffmpeg and colmap. If you wish to run this outside of the docker environment you would have to install these locally.
+2. If you intend to run the NeRF and COLMAP workers locally ensure you have NVIDIA GPUS with atleast 6GB of vram as these are resource intensive applications
 
 ## Output Example
 

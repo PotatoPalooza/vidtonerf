@@ -65,6 +65,47 @@ Nerf:
     "rendered_video_path":str
 }
 ```
+## Refactor
+### Refactored: DB structure 
+```
+{
+    "id": str,
+    "status":int,
+    "video_file_path":str,
+    
+}
+```
+
+### Refactored: RabbitMQ API 
+Json communication between webserver and sfm-worker
+#### sfm-in que: web-server to sfm-worker:
+```
+{
+    "id": str,
+    "frame_links":[str]
+}
+```
+
+#### sfm-out que: sfm-worker to web-server:
+```
+{
+    "id": str,
+    "intrinsic_matrix": [[float]],
+    "frames": [<Frame>]
+}
+```
+
+#### nerf-in que: web-server to nerf
+```
+{
+    "id": str,
+    "frame_links": [str],
+
+}
+```
+
+#### nerf-out que: web-server to nerf
+Handled by pushing to an endpoint
 
 ### RabbitMQ
 RabbitMQ is used to send job requests and final products to and from the web-server to seperate worker processes. This is achieved through 4 queues, nerf-in, nerf-out, sfm-in, sfm-out. Instead of serializing data and sending large files over RabbitMQ everything published to the que will provide URIs to access non text data like videos and images so the other end of the queue can pull the data when needed. On the web-server this happens on two asynchronous threads that listen on sfm-out and nerf-out respectively waiting for jobs to finish before accessing the final product through the URI's provided by the workers and saving it to the local database (MongoDb).

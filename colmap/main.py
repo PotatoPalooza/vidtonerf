@@ -134,8 +134,8 @@ def colmap_worker():
     channel.start_consuming()
     print("should not get here")
 
-if __name__ == "__main__":
-    print("~SFM WORKER~")
+def main():
+    print("~SFM WORKER~",flush=True)
     input_data_dir = "data/inputs/"
     output_data_dir = "data/outputs/"
     Path(f"{input_data_dir}").mkdir(parents=True, exist_ok=True)
@@ -160,3 +160,7 @@ if __name__ == "__main__":
         sfmProcess.start()
         flaskProcess.join()
         sfmProcess.join()
+
+if __name__ == "__main__":
+    print("here",flush=True)
+    main()

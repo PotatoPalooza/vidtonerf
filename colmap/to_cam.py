@@ -83,6 +83,7 @@ if __name__ =='__main__':
 
     input_str = open(input_file)
     input = json.loads(input_str.read())
+    intrinsic = np.array(input["intrinsic_matrix"])
 
     extrins = []
     for f in input["frames"]:

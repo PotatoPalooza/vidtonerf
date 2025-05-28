@@ -35,10 +35,12 @@ def extract_position_data(infile, outfile, debug=False):
     compatible_img_formats = (".jpg\n",".png\n")
     for line in lines:
         words = line.split(' ')
-        if (words[-1].lower()).endswith(compatible_img_formats):
+        # Ensure enough elements for words[0] (ID), words[1:8] (QW-TZ), and words[-1] (name, distinct from TZ)
+        # and that the last element is a compatible image format.
+        if len(words) >= 9 and (words[-1].lower()).endswith(compatible_img_formats):
             image_data = {}
-            qw, qx, qy, qz, tx, ty, tz = words[1:8]
-            imageName = words[-1][:-1]
+            qw, qx, qy, qz, tx, ty, tz = words[1:8] # QW is words[1], TZ is words[7]
+            imageName = words[-1][:-1] # Name is words[8] or later if spaces in name
 
             if debug:
                 print(imageName + "- QW:" + qw + ", QX:" + qx + ", QY:" + qy + ", QZ:" + qz + ", TX:" + tx +", TY:" + ty +", TZ:" + tz)

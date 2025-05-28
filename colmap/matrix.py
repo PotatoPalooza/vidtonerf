@@ -19,7 +19,7 @@ import sys
 import csv
 import math
 import numpy as np
-import image_position_extractor
+from . import image_position_extractor
 import json
 import os
 
@@ -112,12 +112,61 @@ def rotation_matrix_from_vectors(vec1, vec2):
     :param vec2: A 3d "destination" vector
     :return mat: A transform matrix (3x3) which when applied to vec1, aligns it with vec2.
     """
-    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    norm_vec1 = np.linalg.norm(vec1)
+    norm_vec2 = np.linalg.norm(vec2)
+
+    if norm_vec1 == 0 or norm_vec2 == 0:
+        raise ValueError("Input vectors must not be zero vectors.")
+
+    a = (vec1 / norm_vec1).reshape(3)
+    b = (vec2 / norm_vec2).reshape(3)
+
     v = np.cross(a, b)
     c = np.dot(a, b)
     s = np.linalg.norm(v)
+
+    # Check for collinearity
+    if s == 0: # Vectors are collinear
+        if c > 0.99999: # Parallel (c is close to 1)
+            return np.eye(3)
+        elif c < -0.99999: # Anti-parallel (c is close to -1)
+            # Return a 180 degree rotation matrix.
+            # One way: find an arbitrary axis orthogonal to 'a' and rotate by 180 deg.
+            # Simpler: R = 2 * np.outer(a, a) - np.eye(3) if a is unit.
+            # Or, if a = (1,0,0), b = (-1,0,0), rot around Y: [[-1,0,0],[0,1,0],[0,0,-1]]
+            # A general approach for 180 deg rotation:
+            # If a_x, a_y, a_z are components of vector a:
+            # R = [[2*a_x**2-1, 2*a_x*a_y,   2*a_x*a_z],
+            #      [2*a_x*a_y,   2*a_y**2-1, 2*a_y*a_z],
+            #      [2*a_x*a_z,   2*a_y*a_z,   2*a_z**2-1]]
+            # This is equivalent to np.outer(a,a)*2 - np.eye(3)
+            # However, this gives reflection if not careful.
+            # For 180 deg rotation: if a=(1,0,0), b=(-1,0,0), should be like diag([-1, -1, 1]) or diag([-1,1,-1]) etc.
+            # A robust way to find a 180-degree rotation for anti-parallel vectors:
+            # If a = [1,0,0], b = [-1,0,0], a rotation could be around Z by 180 deg (diag([-1,-1,1]))
+            # or around Y by 180 deg (diag([-1,1,-1])).
+            # The original formula for axis-angle R = I + sin(theta)*K + (1-cos(theta))*K^2.
+            # For theta=pi (180 deg), sin(theta)=0, cos(theta)=-1. R = I + 2*K^2.
+            # K is the skew-symmetric matrix of an axis u. This axis u needs to be found.
+            # Any axis perpendicular to 'a' will do.
+            # Let's try to find a perpendicular vector to 'a'.
+            if np.allclose(a, [1, 0, 0]) or np.allclose(a, [-1, 0, 0]): # if a is along x-axis
+                u = np.array([0, 1, 0]) # Rotate around y-axis
+            else:
+                u = np.cross(a, [1, 0, 0]) # Try to find a perpendicular axis
+                if np.linalg.norm(u) < 1e-6: # If a was parallel to [1,0,0], u would be zero
+                    u = np.cross(a, [0, 1, 0]) # Try another one
+            u = u / np.linalg.norm(u)
+            # K matrix for this axis u
+            k_u = np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
+            return np.eye(3) + 2 * k_u.dot(k_u)
+        else: # Should not happen if s=0 implies c is 1 or -1 for unit vectors
+            return np.eye(3)
+
+
     kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    # Using s**2 (s squared) ensures we use a positive value in the denominator
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s**2))
     return rotation_matrix
 
 def get_extrinsic(center_point, fp: str = "parsed_data.csv"):
@@ -225,17 +274,35 @@ def get_intrinsic(fp: str = "cameras.txt"):
     infile = open(fp, "r")
     lines = infile.readlines()
 
+    read_params = False # Flag to indicate if we've successfully read params from a line
     for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        
         data = line.split(" ")
-        if not data[0].startswith("#"):
-            camera = data[1]
-            width = int(data[2])
-            height = int(data[3])
+        # Filter out empty strings that can result from multiple spaces
+        data = [d for d in data if d]
 
-            fx = float(data[4])
-            fy = float(data[5])
-            x0 = float(data[6])
-            y0 = float(data[7])
+        if len(data) >= 8: # Need at least CAM_ID, MODEL, W, H, fx, fy, cx, cy
+            try:
+                camera = data[1] # MODEL
+                width = int(data[2])
+                height = int(data[3])
+                fx = float(data[4])
+                fy = float(data[5])
+                x0 = float(data[6])
+                y0 = float(data[7])
+                read_params = True # Successfully read and parsed parameters
+            except ValueError:
+                # Malformed line (e.g., non-numeric value for size/params), skip
+                continue
+            except IndexError:
+                 # Should be caught by len(data) >= 8, but as a safeguard
+                continue
+        
+    if not read_params:
+        raise ValueError("No valid camera intrinsic parameters found in file.")
 
     intrinsic = np.array([[fx, 0, x0], 
                           [0, fy, y0],
@@ -258,15 +325,34 @@ def get_extrinsics_center(fp: str = "points3D.txt"):
     central_point = np.zeros(3)
     # find center of all the points
     for line in lines:
-        data = line.split(" ")
-        if not data[0].startswith("#"):
-            # X Y Z
-            central_point[0] += float(data[1])
-            central_point[1] += float(data[2])
-            central_point[2] += float(data[3])
-            point_count+=1
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
 
-    central_point /= point_count
+        data = line.split(" ")
+        # Filter out empty strings
+        data = [d for d in data if d]
+
+        if len(data) >= 4: # Need at least POINT_ID, X, Y, Z
+            try:
+                # X Y Z
+                central_point[0] += float(data[1])
+                central_point[1] += float(data[2])
+                central_point[2] += float(data[3])
+                point_count += 1
+            except ValueError:
+                # Malformed line (e.g., non-numeric coordinate), skip
+                continue
+            except IndexError:
+                # Should be caught by len(data) >=4, but as safeguard
+                continue
+
+    if point_count == 0:
+        # Return NaN or raise error, current behavior is NaN due to division by zero.
+        # Let's make it explicit to avoid RuntimeWarning for 0/0.
+        return np.array([np.nan, np.nan, np.nan])
+    else:
+        central_point /= point_count
     print("Central point: ", central_point)
     return central_point
 

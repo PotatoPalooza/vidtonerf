@@ -39,9 +39,12 @@ from random import sample
 #    1 = Unspecified error
 #    2 = FileExistsError; happens when you try to create data in an already existing folder
 #    3 = FileNotFoundError; happens when you try to use an output folder that does not exist
+#    4 = Video is too blurry (if blur_check is True)
 
-def split_video_into_frames(video_path, output_path, max_frames=500, blur_check = False):
-  print("Here")
+def split_video_into_frames(video_path: str, output_dir_path: str, num_frames_to_select: int = 200, blur_check: bool = False):
+  # Standardized parameter names: video_path, output_dir_path, num_frames_to_select
+  # Removed max_frames and used num_frames_to_select for clarity, default 200.
+  print("Here") # Original print
   ## determines whether image is blurry or not.
   # uses the variance of a laplacian transform to check for edges and returns true
   # if the variance is less than the threshold and the video is determined to be blurry
@@ -62,51 +65,89 @@ def split_video_into_frames(video_path, output_path, max_frames=500, blur_check 
     return laplacian_var
 
   # Create output folder
-  Path(f"{output_path}").mkdir(parents=True, exist_ok=True)
+  Path(output_dir_path).mkdir(parents=True, exist_ok=True)
 
   ## determine video length:
-  # TODO: Check video type to ensure it is supported
-  vidcap = cv2.VideoCapture(video_path )
-  frame_count = vidcap.get(cv2.CAP_PROP_FRAME_COUNT)
-  frame_count = int(frame_count)
+  vidcap = cv2.VideoCapture(video_path)
+  if not vidcap.isOpened():
+      print(f"Error: Could not open video file: {video_path}")
+      return 3 # Using 3 for "file not found / cannot open" type errors as per docstring hints
 
-  ## sample up to max frame count
-  sample_count = min(frame_count,max_frames)
-  print("SAMPLE COUNT:", sample_count)
+  frame_count = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
+  if frame_count <= 0:
+      print(f"Error: Video file {video_path} has no frames or invalid frame count.")
+      vidcap.release()
+      return 1 # Unspecified error or could define a new one for "no frames"
+
+  ## sample up to num_frames_to_select
+  actual_frames_to_sample = min(frame_count, num_frames_to_select)
+  if actual_frames_to_sample <= 0: # Handle cases where num_frames_to_select might be 0 or negative
+      actual_frames_to_sample = frame_count # Default to all frames or 1? Let's say all if non-positive.
+                                          # Or, more strictly, if num_frames_to_select <= 0, perhaps 0 frames.
+                                          # For now, let's ensure it's at least 1 if frame_count > 0.
+      if frame_count > 0:
+          actual_frames_to_sample = min(frame_count, 1) if num_frames_to_select <=0 else actual_frames_to_sample
+
+
+  print(f"Frame count: {frame_count}, Target samples: {num_frames_to_select}, Actual samples: {actual_frames_to_sample}")
+
 
   success, image = vidcap.read()
+  if not success or image is None: # Check if first frame read failed
+      print(f"Error: Could not read first frame from video {video_path}.")
+      vidcap.release()
+      return 1 # Unspecified error
   img_height = image.shape[0]
   img_width = image.shape[1]
 
   if blur_check:
     ## Rank all images based off bluriness
     blur_list = []
+    frame_indices_for_blur_check = []
+    current_frame_idx = 0
     ## check blurriness of all images and sort to caluculate threshold
     while success:
       image_blur = blurriness(image)
       blur_list.append(image_blur)
+      frame_indices_for_blur_check.append(current_frame_idx)
+      current_frame_idx +=1
       success, image = vidcap.read()
+    
+    # Important: Reset video capture to read frames again for saving
+    vidcap.release() 
+    vidcap = cv2.VideoCapture(video_path) # Re-open or reset
 
-    vidcap.release()
+    if not blur_list: # No frames read during blur check
+        print("Error: No frames could be read for blur analysis.")
+        vidcap.release()
+        return 1
+
     sorted_list = sorted(blur_list)
     ## we want the remaining best images
     ## e.g, if we want 75 images out of 100, threshold should be 25th image
-    threshold_img = len(blur_list) - sample_count
-    THRESHOLD = sorted_list[threshold_img]
+    # Ensure threshold_idx is valid
+    threshold_idx = max(0, len(blur_list) - actual_frames_to_sample) 
+    if threshold_idx >= len(sorted_list): # Handles cases where actual_frames_to_sample might be 0 or too small
+        THRESHOLD = sorted_list[-1] + 1 # Ensure no frames are selected if not enough valid ones
+    else:
+        THRESHOLD = sorted_list[threshold_idx]
 
-    ## checks number of images within the threshold
-    count_good_img = 0
-    for i in blur_list:
-      if i >= THRESHOLD:
-        count_good_img += 1
+    # Select frames that meet the threshold
+    selected_frame_indices_for_saving = []
+    temp_blur_values_and_indices = []
 
-    ## account for not enough images in threshold so that we return the exact number of images
-    if count_good_img > sample_count:
-      for i in range(count_good_img - sample_count):
-        for val in blur_list:
-          if val >= THRESHOLD:
-            val = 0
-            break
+    for i, blur_val in enumerate(blur_list):
+        if blur_val >= THRESHOLD:
+            temp_blur_values_and_indices.append({'blur': blur_val, 'original_index': frame_indices_for_blur_check[i]})
+            
+    # Sort by blurriness (desc) to pick the best ones if more than needed
+    temp_blur_values_and_indices.sort(key=lambda x: x['blur'], reverse=True)
+    
+    for item in temp_blur_values_and_indices[:actual_frames_to_sample]:
+        selected_frame_indices_for_saving.append(item['original_index'])
+    
+    # Sort selected_frame_indices_for_saving to write in order if desired, though not strictly necessary
+    selected_frame_indices_for_saving.sort()
         
 
     ## If this threshold is too low, completely reject video 
@@ -146,57 +187,70 @@ def split_video_into_frames(video_path, output_path, max_frames=500, blur_check 
   #print(f"new img width: {img_width}")
   dimensions = (img_width, img_height)
 
+  current_frame_num = 0 # Keep track of the frame number we are reading from video
+  saved_frame_count = 0 # Number of frames actually saved
 
-  count = 0
-  img_idx = 0
+  success, image = vidcap.read() # Start reading frames for saving
 
-  ## write to the folder the images we want
-  #vidcap = cv2.VideoCapture(video_path)
-  #success, image = vidcap.read()
-  print(success)
-  #frame_count
-  #sample count
-  # if count % frame_count // sample_count == 0
-  while success:
-    if (blur_check):
-      if (blur_list[count] >= THRESHOLD):
-        print("heare")
-        if (needs_adjust == True):
-          image = cv2.resize(image, dimensions, interpolation=cv2.INTER_LANCZOS4)
-        cv2.imwrite(f"{output_path}/img_{count:04}.png", image)  
-        print('Saved image ', count)
-    else:
-      if (count % (frame_count // sample_count) == 0):
-        if (needs_adjust == True):
-          image = cv2.resize(image, dimensions, interpolation=cv2.INTER_LANCZOS4)
-        cv2.imwrite(f"{output_path}/img_{img_idx:04}.png", image)  
-        print('Saved image ', img_idx)
-        img_idx+=1
+  if blur_check:
+      # Iterate through frames and save only those selected by blur check
+      frames_to_save_set = set(selected_frame_indices_for_saving)
+      while success and saved_frame_count < len(selected_frame_indices_for_saving):
+          if current_frame_num in frames_to_save_set:
+              if needs_adjust:
+                  image = cv2.resize(image, dimensions, interpolation=cv2.INTER_LANCZOS4)
+              cv2.imwrite(f"{output_dir_path}/img_{current_frame_num:04}.png", image)
+              # print(f'Saved image (blur check) {current_frame_num}') # Original print
+              saved_frame_count += 1
+          success, image = vidcap.read()
+          current_frame_num += 1
+  else:
+      # Simple interval-based sampling
+      if actual_frames_to_sample == 0: # Should not happen if actual_frames_to_sample logic is robust
+          vidcap.release()
+          return 0 # No frames to sample
 
-    success, image = vidcap.read()
-    
-    count += 1
+      step = frame_count // actual_frames_to_sample
+      if step == 0 and frame_count > 0 : # Avoid step=0 if actual_frames_to_sample > frame_count (should be handled by min)
+          step = 1
+      
+      img_idx_sequential = 0 # For sequential naming like img_0000.png, img_0001.png
+      while success and saved_frame_count < actual_frames_to_sample:
+          if current_frame_num % step == 0:
+              if needs_adjust:
+                  image = cv2.resize(image, dimensions, interpolation=cv2.INTER_LANCZOS4)
+              # Using sequential index for non-blur check as per original logic for this branch
+              cv2.imwrite(f"{output_dir_path}/img_{img_idx_sequential:04}.png", image)
+              # print(f'Saved image (interval) {img_idx_sequential} from original frame {current_frame_num}') # Original print
+              img_idx_sequential +=1
+              saved_frame_count += 1
+          success, image = vidcap.read()
+          current_frame_num += 1
+  
   vidcap.release()
-
-  #Sucess, return 0
-  ## can return img_width, img_height, and wanted_frames
   return 0
 
-def test():
-  instance_name = "test"
-  output_path = "test_out"
-  ffmpeg_path = ""
-  video_path = "landscape_video" # change to whatever vid you want
-  wanted_frames = 2001
-  split_video_into_frames(instance_name, output_path, ffmpeg_path, video_path, wanted_frames)
+
+# Test function seems outdated due to signature changes and ffmpeg references
+# def test():
+#   instance_name = "test"
+#   output_path = "test_out"
+#   ffmpeg_path = ""
+#   video_path = "landscape_video" # change to whatever vid you want
+#   wanted_frames = 2001
+#   split_video_into_frames(instance_name, output_path, ffmpeg_path, video_path, wanted_frames)
 
 if __name__ == '__main__':
-    #Default flags
-    instance_name = "ffmpeg_output"
-    output_path = "./"
-    ffmpeg_path = r".\ffmpeg.exe"
-    video_path = r".\video.mp4"
-    wanted_frames = 24
+    # This main block is also outdated due to signature changes and ffmpeg removal.
+    # It should be updated or removed if not used.
+    # For now, commenting out to prevent errors if run directly.
+    pass
+    # #Default flags
+    # instance_name = "ffmpeg_output"
+    # output_path = "./"
+    # ffmpeg_path = r".\ffmpeg.exe"
+    # video_path = r".\video.mp4"
+    # wanted_frames = 24
 
     #Parse flags
     #Flag format up top

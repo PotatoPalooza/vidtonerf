@@ -1,4 +1,4 @@
-from to_cam import CameraPoseVisualizer
+from .to_cam import CameraPoseVisualizer
 import json
 import sys
 import numpy as np

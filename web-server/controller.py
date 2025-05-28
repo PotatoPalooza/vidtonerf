@@ -6,7 +6,7 @@ from uuid import uuid4, UUID
 
 from flask import Flask, request, make_response, send_file, send_from_directory, url_for
 
-from models.scene import UserManager
+from models.scene import UserManager, QueueListManager
 from services.scene_service import ClientService
 
 def is_valid_uuid(value):
@@ -17,12 +17,13 @@ def is_valid_uuid(value):
         return False
 
 class WebServer:
-    def __init__(self, flaskip, args: argparse.Namespace, cserv: ClientService) -> None:
+    def __init__(self, flaskip, args: argparse.Namespace, cserv: ClientService, queue_man: QueueListManager) -> None:
         self.flaskip = flaskip
         self.app = Flask(__name__)
         self.args = args
         self.cservice = cserv
         self.user_manager=UserManager()
+        self.queue_manager=queue_man
 
     def run(self) -> None:
         self.app.logger.setLevel(
@@ -47,7 +48,7 @@ class WebServer:
             given a cookie to see if the video is done periodically
             """
             video_file = request.files.get("file")
-            print("VIDEO FILE", video_file)
+            
             # TODO: UUID4 is cryptographically secure on CPython, but this is not guaranteed in the specifications.
             # Might want to change this.
             # TODO: Don't assume videos are in mp4 format
@@ -102,59 +103,94 @@ class WebServer:
             # TODO make this access secure
             return send_from_directory('data',path[5:])
             
-        @self.app.route("/login", methods=["GET"])
+        @self.app.route("/login", methods=["POST", "OPTIONS"])
         def login_user():
             #get username and password from login 
             #use get_user_by_username and compare the password retrieved from that to the password given by the login
             #if they match allow the user to login, otherwise, fail
 
-            username=request.form["username"]
-            password=request.form["password"]
-
-            user=self.user_manager.get_user_by_username(username)
-            if user==None:
-                string=f"INCORRECT USERNAME|{user.id}"
-                response=make_response(string)
+            if request.method == "OPTIONS":
+                response = make_response()
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
                 return response
 
-            if user.password == password:
-                string=f"SUCCESS|{user.id}"
-                response=make_response(string)
-                return response
-            else:
-                string=f"INCORRECT PASSWORD|{user.id}"
-                response=make_response(string)
-                return response
+            try:
+                req_data = request.get_json()
+        
+                username=req_data["username"]
+                password=req_data["password"]
+                
+                user=self.user_manager.get_user_by_username(username)
+                if user==None:
+                    raise Exception(f"INCORRECT USERNAME")
+                if user.password == str(hash(password)):
+                    string=f"SUCCESS"
+                    code = 200
+                else:
+                    raise Exception(f"INCORRECT PASSWORD")
+            except Exception as e:
+                string = f"Error: {str(e)}"
+                code = 400
+            response = make_response(string)
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Allow CORS
+            response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'  # Allow CORS
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            response.status_code = code  # Bad Request
+            return response
 
 
 
-        @self.app.route("/register", methods=["POST"])
+        @self.app.route("/register", methods=["POST", "OPTIONS"])
         def register_user():
             #get username and password from register
             #use set_user
             #if it doesnt fail, youre all good
-
-
-            username=request.form["username"]
-            password=request.form["password"]
-
-            user=self.user_manager.generate_user(username,password)
-
-            if user==1:
-                string=f"USERNAME CONFLICT|{user.id}"
-                response=make_response(string)
+            
+            #DEBUGGING
+            if request.method == "OPTIONS":
+                response = make_response()
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
                 return response
-            if user==None:
-                raise Exception('Unknown error when generating user')
 
-
-
-            string=f"SUCCESS|{user.id}"
-            response=make_response(string)
+            try:
+                req_data = request.get_json()
+        
+                username=req_data["username"]
+                password=req_data["password"]
+                
+                user=self.user_manager.generate_user(username,password)
+                
+                if user==1:
+                    raise Exception(f"USERNAME CONFLICT")
+                if user==None:
+                    raise Exception('Unknown error when generating user')
+                string=f"SUCCESS"
+                code = 200
+            except Exception as e:
+                string = f"Error: {str(e)}"
+                code = 400
+            response = make_response(string)
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Allow CORS
+            response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'  # Allow CORS
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            response.status_code = code  # Bad Request
             return response
+
+        # Returns the queue position of a task in a queue
+        # queueid: sfm_list, nerf_list, queue_list
+        # id: uuid of task
+        @self.app.route("/queue",methods=["GET"])
+        def send_queue_position(queueid: str, id: str):
+            return make_response(self.queue_manager.get_queue_position(queueid,id))
 
         @self.app.route("/test")
         def test_endpoint():
-            
-            return "Success!"
+            status_str = "Success!"
+            response = make_response(status_str)
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Allow CORS
+            return response
 

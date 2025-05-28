@@ -1,20 +1,31 @@
 
 import pika, os, logging
-from models.scene import Video, Sfm, Nerf, SceneManager
+from models.scene import Video, Sfm, Nerf, SceneManager, QueueListManager
 import json
 from urllib.parse import urlparse
 import requests
 from flask import url_for
 import time
+import os
+from dotenv import load_dotenv
+import numpy as np
+import math
+import random
+import sklearn.cluster
+
+
+# Load environment variables from .env file at the root of the project
+load_dotenv()
 
 #TODO: make rabbitmq resistent to failed worker jobs
 
 class RabbitMQService:
     # TODO: Communicate with rabbitmq server on port defined in web-server arguments
-    def __init__(self, rabbitip):
+    def __init__(self, rabbitip, manager):
         rabbitmq_domain = rabbitip
-        credentials = pika.PlainCredentials('admin', 'password123')
+        credentials = pika.PlainCredentials(str(os.getenv("RABBITMQ_DEFAULT_USER")), str(os.getenv("RABBITMQ_DEFAULT_PASS")))
         parameters = pika.ConnectionParameters(rabbitmq_domain, 5672, '/', credentials, heartbeat=300)
+        self.queue_manager = manager
         
         #2 minute timer
         timeout = time.time() + 60 * 2
@@ -36,6 +47,7 @@ class RabbitMQService:
         self.base_url = "http://localhost:5000/"
         # for docker
         self.base_url = "http://host.docker.internal:5000/"
+        # for queue list positions
 
     def to_url(self,file_path):
         return self.base_url+"/worker-data/"+file_path
@@ -51,6 +63,9 @@ class RabbitMQService:
         }
         json_job = json.dumps(job)
         self.channel.basic_publish(exchange='', routing_key='sfm-in', body=json_job)
+        # add to sfm_list and queue_list (first received, goes into overarching queue) queue manager
+        self.queue_manager.append_queue("sfm_list",id)
+        self.queue_manager.append_queue("queue_list",id)
            
     def publish_nerf_job(self, id: str, vid: Video, sfm: Sfm):
         """
@@ -73,6 +88,8 @@ class RabbitMQService:
         combined_job = {**job, **sfm_data}
         json_job = json.dumps(combined_job)
         self.channel.basic_publish(exchange='', routing_key='nerf-in', body=json_job)
+        # add to nerf_list queue manager
+        self.queue_manager.append_queue("nerf_list",id)
 
 
     #call
@@ -84,11 +101,136 @@ class RabbitMQService:
         # "frames" = array of urls and extrinsic_matrix[float]
     #   channel.basic.consume(on_message_callback = callback_sfm_job, queue = sfm_out)
 
+def find_elbow_point(data, max_k=35):
+    """
+    Finds the elbow point in a graph of Within-Cluster Sum of Squares (WCSS) values.
 
+    Args:
+        data (array-like): The input data for clustering.
+        max_k (int, optional): The maximum number of clusters to consider. Defaults to 35.
 
-def digest_finished_sfms(rabbitip, scene_manager: SceneManager):
+    Returns:
+        int: The optimal number of clusters (elbow point).
+        list: The x values for the graph.
+        list: The WCSS values for the graph.
+    """
+
+    # Within-Cluster Sum of Squares (WCSS)
+    wcss = []
+
+    # Set a maximum limit for computational efficiency
+    max_k = min(len(data), max_k)  
+
+    # Check if max_k is very large
+    max_k = max(max_k, math.floor(math.sqrt(len(data))))
+
+    # Calculate WCSS for different values of k
+    for k in range(1, max_k + 1):
+        kmeans = sklearn.cluster.KMeans(n_clusters=k, init='k-means++', max_iter=300, n_init=10, random_state=0)
+        kmeans.fit(data)
+        wcss.append(kmeans.inertia_)
+
+    # Fill in x values for elbow function 
+    x = range(1, len(wcss)+1)
+
+    # Determine Elbow point of graph
+    #TODO: fix this
+    #elbow = kneed.KneeLocator(x, wcss, curve = 'convex', direction='decreasing')
+    
+    # Returns elbow point (along with x and y values for graph testing)
+    #return elbow.knee, x, wcss
+
+def k_mean_sampling(frames, size=100):
+    """
+    Perform k-means clustering on the given frames to sample a subset of frames.
+
+    Args:
+        frames (dict): A dictionary containing the frames data.
+        size (int, optional): The desired size of the sampled subset. Defaults to 100.
+
+    Returns:
+        list: A list of indices representing the closest frames to the centroids of each cluster.
+    """
+    CLUSTERS = size
+
+    extrins = []
+    angles = []
+    for f in frames["frames"]:
+        extrinsic = np.array(f["extrinsic_matrix"])
+        extrins+=[ extrinsic ]
+    for i,e in enumerate(extrins):
+
+        # t == rectangular coordinates
+        t = e[0:3,3]
+
+        # s == spherical coordinates
+
+        # r = sqrt(x^2 + y^2 + z^2)
+        r = math.sqrt((t[0]*t[0])+(t[1]*t[1])+(t[2]*t[2]))
+        theta = math.acos(t[2]/r)
+        phi = math.atan(t[1]/t[0])
+
+        #convert radian to degrees
+
+        theta = (theta * 180) / math.pi
+        phi = (phi * 180) / math.pi
+
+        s = [theta,phi]
+
+        angles.append(s)
+
+    #elbow_point, _, _ = find_elbow_point(angles)
+    elbow_point = 10
+    km = sklearn.cluster.Kmeans(n_clusters=elbow_point, n_init=10)
+    km.fit(angles)
+
+    labels = km.labels
+    if (len(set(labels)) != elbow_point):
+        print("Error with clustering")
+
+    cluster_array = [ [] for _ in range(elbow_point) ]
+
+    for i in range(len(angles)):
+        cluster_array[labels[i]].append(i)
+
+    centroids = km.cluster_centers_
+    closest_frames = []
+
+    # Find the frame closest to each centroid in each cluster
+    for idx, cluster_indices in enumerate(cluster_array):
+
+        # Extract data points belonging to the current cluster
+        cluster_data = np.array([angles[i] for i in cluster_indices])
+        
+        # Calculate the centroid of the current cluster
+        centroid = centroids[idx]
+
+        # Calculate the distances between each data point and the centroid
+        distances = np.linalg.norm(cluster_data - centroid, axis=1)
+
+        # Find the index of the closest frame within the current cluster
+        closest_frame_index = cluster_indices[np.argmin(distances)]
+        
+        # Append the index of the closest frame to the list
+        closest_frames.append(closest_frame_index)
+
+    return closest_frames
+
+def digest_finished_sfms(rabbitip, scene_manager: SceneManager, queue_manager: QueueListManager):
 
     def process_sfm_job(ch,method,properties,body):
+        """
+        Process the SFM (Structure from Motion) job.
+
+        Args:
+            ch: The channel object for communication with RabbitMQ.
+            method: The method object containing the delivery tag.
+            properties: The properties object containing message properties.
+            body: The message body containing the SFM data.
+
+        Returns:
+            None
+        """
         #load queue object
         sfm_data = json.loads(body.decode())
         id = sfm_data['id']
@@ -109,7 +251,12 @@ def digest_finished_sfms(rabbitip, scene_manager: SceneManager):
 
             path = os.path.join(os.getcwd(), file_path)
             sfm_data['frames'][i]["file_path"] = file_path
+        
+        # Get indexes of k mean grouped frames
+        k_sampled = k_mean_sampling(sfm_data)
 
+        # Use those frames to revise list of frames used in sfm generation
+        sfm_data['frames'] = [sfm_data['frames'][i] for i in k_sampled]
 
         #call SceneManager to store to database
         vid = Video.from_dict(sfm_data)
@@ -117,13 +264,16 @@ def digest_finished_sfms(rabbitip, scene_manager: SceneManager):
         scene_manager.set_sfm(id,sfm)
         scene_manager.set_video(id,vid)
 
+        #remove video from sfm_list queue manager
+        queue_manager.pop_queue("sfm_list",id)
+
         print("saved finished sfm job")
         new_data = json.dumps(sfm_data)
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
     # create unique connection to rabbitmq since pika is NOT thread safe
     rabbitmq_domain = rabbitip
-    credentials = pika.PlainCredentials('admin', 'password123')
+    credentials = pika.PlainCredentials(str(os.getenv("RABBITMQ_DEFAULT_USER")), str(os.getenv("RABBITMQ_DEFAULT_PASS")))
     parameters = pika.ConnectionParameters(rabbitmq_domain, 5672, '/', credentials, heartbeat=300)
 
     #2 minute timer
@@ -151,9 +301,21 @@ def digest_finished_sfms(rabbitip, scene_manager: SceneManager):
             continue
 
 
-def digest_finished_nerfs(rabbitip,scene_manager: SceneManager):
+def digest_finished_nerfs(rabbitip,scene_manager: SceneManager, queue_manager: QueueListManager):
 
     def process_nerf_job(ch,method,properties,body):
+        """
+        Process the Nerf job.
+
+        Args:
+            ch: The channel object for communication with RabbitMQ.
+            method: The method object containing the delivery tag.
+            properties: The properties object containing message properties.
+            body: The message body containing the Nerf data.
+
+        Returns:
+            None
+        """
         nerf_data = json.loads(body.decode())
         video = requests.get(nerf_data['rendered_video_path'])
         filepath = "data/nerf/" 
@@ -167,10 +329,14 @@ def digest_finished_nerfs(rabbitip,scene_manager: SceneManager):
         nerf.from_dict(nerf_data)
         scene_manager.set_nerf(id, nerf)
         #ch.basic_ack(delivery_tag=method.delivery_tag)
+
+        #remove video from nerf_list and queue_list (end of full process) queue manager
+        queue_manager.pop_queue("nerf_list",id)
+        queue_manager.pop_queue("queue_list",id)
     
     # create unique connection to rabbitmq since pika is NOT thread safe
     rabbitmq_domain = rabbitip
-    credentials = pika.PlainCredentials('admin', 'password123')
+    credentials = pika.PlainCredentials(str(os.getenv("RABBITMQ_DEFAULT_USER")), str(os.getenv("RABBITMQ_DEFAULT_PASS")))
     parameters = pika.ConnectionParameters(rabbitmq_domain, 5672, '/', credentials,heartbeat=300)
 
     #2 minute timer
